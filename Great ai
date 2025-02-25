@@ -1,0 +1,492 @@
+function MainComponent() {
+  const textStyles = {
+    h2: "text-xl font-semibold mt-4 mb-2",
+    p: "mb-3 leading-relaxed",
+  };
+  const [messages, setMessages] = useState([
+    {
+      role: "system",
+      content:
+        "You are a helpful AI assistant created by Great. You should be friendly and concise in your responses.",
+    },
+    {
+      role: "assistant",
+      content: "Hello! I'm your Great AI assistant. How can I help you today?",
+    },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const languages = [
+    { code: "en", name: "English" },
+    { code: "es", name: "Spanish" },
+    { code: "fr", name: "French" },
+    { code: "de", name: "German" },
+    { code: "it", name: "Italian" },
+    { code: "pt", name: "Portuguese" },
+    { code: "ru", name: "Russian" },
+    { code: "ja", name: "Japanese" },
+    { code: "ko", name: "Korean" },
+    { code: "zh", name: "Chinese" },
+    { code: "ar", name: "Arabic" },
+    { code: "hi", name: "Hindi" },
+  ];
+  const messagesEndRef = useRef(null);
+  const recognition = useRef(null);
+  const synthesis = useRef(window.speechSynthesis);
+  const currentUtterance = useRef(null);
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+  const { data: user, loading: userLoading } = useUser();
+
+  if (userLoading) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-4 border-[#0be33c] border-t-transparent"></div>
+      </div>
+    );
+  }
+
+  useEffect(() => {
+    if (!userLoading && !user) {
+      window.location.href = "/account/signin";
+      return;
+    }
+
+    if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition.current = new SpeechRecognition();
+      recognition.current.continuous = false;
+      recognition.current.interimResults = false;
+
+      recognition.current.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setInput(transcript);
+        setIsListening(false);
+      };
+
+      recognition.current.onerror = () => {
+        setIsListening(false);
+      };
+    }
+  }, [user, userLoading]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    const trackActivity = async () => {
+      await fetch("/api/track-user-activity", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action_type: "opened_chat",
+        }),
+      });
+    };
+
+    trackActivity();
+  }, []);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const userMessage = { role: "user", content: input };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const response = await fetch("/integrations/chat-gpt/conversationgpt4", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: messages.concat(userMessage),
+          stream: false,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to get response");
+      }
+
+      const data = await response.json();
+      const assistantMessage = {
+        role: "assistant",
+        content: data.choices[0].message.content,
+      };
+
+      if (selectedLanguage !== "en") {
+        const translationResponse = await fetch("/api/translate-response", {
+          method: "POST",
+          body: JSON.stringify({
+            q: assistantMessage.content,
+            target: selectedLanguage,
+          }),
+        });
+
+        if (translationResponse.ok) {
+          const translationData = await translationResponse.json();
+          assistantMessage.content = translationData.translatedText;
+        }
+      }
+
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      if (voiceMode) {
+        speakMessage(assistantMessage.content);
+      }
+
+      await fetch("/api/track-user-activity", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action_type: "sent_message",
+        }),
+      });
+    } catch (error) {
+      console.error(error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Sorry, I couldn't process your request.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const toggleSpeechRecognition = () => {
+    if (isListening) {
+      recognition.current?.stop();
+    } else {
+      recognition.current?.start();
+    }
+    setIsListening(!isListening);
+  };
+  const speakMessage = (text) => {
+    if (synthesis.current.speaking && currentUtterance.current) {
+      synthesis.current.cancel();
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = selectedLanguage;
+    currentUtterance.current = utterance;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      currentUtterance.current = null;
+    };
+    utterance.onpause = () => setIsSpeaking(false);
+    utterance.onresume = () => setIsSpeaking(true);
+
+    synthesis.current.speak(utterance);
+  };
+  const stopSpeaking = () => {
+    synthesis.current.cancel();
+    currentUtterance.current = null;
+    setIsSpeaking(false);
+  };
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  const formatMessage = (content) => {
+    const codeBlockRegex = /(\w+)?\n([\s\S]*?)/g;
+    const parts = [];
+    let lastIndex = 0;
+    let match;
+
+    while ((match = codeBlockRegex.exec(content)) !== null) {
+      if (match.index > lastIndex) {
+        const textContent = content.slice(lastIndex, match.index);
+        parts.push({
+          type: "text",
+          content: formatTextContent(textContent),
+        });
+      }
+
+      const language = match[1] || "plaintext";
+      let formattedCode = match[2].trim();
+
+      if (language === "html") {
+        formattedCode = formattedCode
+          .replace(
+            /(&lt;|<)(\/?)(\w+[-\w]*)([\s>])/g,
+            '$1$2<span class="text-[#61afef]">$3</span>$4',
+          )
+          .replace(/\s([\w-]+)=/g, ' <span class="text-[#98c379]">$1</span>=')
+          .replace(/"([^"]*)"/g, '<span class="text-[#d19a66]">"$1"</span>');
+      } else if (language === "css") {
+        formattedCode = formattedCode
+          .replace(
+            /([\.\#][\w-]+)\s*{/g,
+            '<span class="text-[#61afef]">$1</span> {',
+          )
+          .replace(/([\w-]+):/g, '<span class="text-[#98c379]">$1</span>:')
+          .replace(
+            /:\s*([\w-]+|\d+\w*)/g,
+            ': <span class="text-[#d19a66]">$1</span>',
+          )
+          .replace(
+            /(\d+)(px|em|rem|%)/g,
+            '<span class="text-[#d19a66]">$1</span><span class="text-[#61afef]">$2</span>',
+          );
+      } else if (language === "javascript") {
+        formattedCode = formattedCode
+          .replace(
+            /(const|let|var|function|return|if|else|for|while|class|import|export|default|from|async|await)\b/g,
+            '<span class="text-[#c678dd]">$1</span>',
+          )
+          .replace(
+            /(['"`])(.*?)\1/g,
+            '<span class="text-[#98c379]">$1$2$1</span>',
+          )
+          .replace(/\b(\d+)\b/g, '<span class="text-[#d19a66]">$1</span>')
+          .replace(/\b(\w+)\(/g, '<span class="text-[#61afef]">$1</span>(');
+      }
+
+      parts.push({
+        type: "code",
+        language,
+        content: formattedCode,
+      });
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < content.length) {
+      parts.push({
+        type: "text",
+        content: formatTextContent(content.slice(lastIndex)),
+      });
+    }
+
+    return parts;
+  };
+
+  const formatTextContent = (text) => {
+    text = text.replace(
+      /^(\d+\.\s+)?(.+?)(?=\n|$)/gm,
+      (match, number, content) => {
+        if (number) {
+          return `<h2 class="text-xl font-semibold mt-4 mb-2">${number}${content}</h2>`;
+        }
+        return match;
+      },
+    );
+
+    text = text.replace(
+      /([^\n]+)(?:\n|$)/g,
+      '<p class="mb-3 leading-relaxed">$1</p>',
+    );
+
+    return text;
+  };
+
+  return (
+    <div className="h-screen flex flex-col bg-white">
+      <div className="fixed top-0 left-0 right-0 bg-white z-20 border-b border-gray-100">
+        <div className="flex justify-between items-center px-4 py-3">
+          <div className="flex items-center gap-2">
+            <img
+              src="https://ucarecdn.com/a7d7893b-3d24-4e94-aac4-9752030f961a/-/format/auto/"
+              alt="AI Assistant"
+              className="w-8 h-8 rounded-full"
+            />
+            <h1 className="text-lg font-semibold text-gray-800">
+              Great AI Assistant
+            </h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedLanguage}
+              onChange={(e) => setSelectedLanguage(e.target.value)}
+              className="rounded-full px-3 py-1.5 text-sm border border-gray-200 focus:outline-none focus:border-[#0be33c] bg-white"
+            >
+              {languages.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.name}
+                </option>
+              ))}
+            </select>
+            <a
+              href="/cpanel"
+              className="text-gray-600 hover:text-gray-800 mr-4"
+            >
+              <i className="fas fa-cog"></i>
+            </a>
+            <a
+              href="/account/logout"
+              className="text-gray-600 hover:text-gray-800"
+            >
+              <i className="fas fa-sign-out-alt"></i>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto pt-16 pb-24">
+        <div className="max-w-screen-sm mx-auto px-3">
+          {messages.map((message, index) => (
+            <div
+              key={index}
+              className={`mb-3 flex ${
+                message.role === "user" ? "justify-end" : "justify-start"
+              }`}
+            >
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                  message.role === "user"
+                    ? "bg-[#0be33c] text-white"
+                    : "bg-gray-100 text-gray-800"
+                }`}
+              >
+                {message.role === "assistant" && (
+                  <div className="flex items-center justify-end gap-1 mb-1">
+                    <button
+                      onClick={() => speakMessage(message.content)}
+                      className="p-1.5 rounded-full hover:bg-gray-200"
+                    >
+                      <i
+                        className={`fas ${isSpeaking ? "fa-pause" : "fa-play"} 
+                  ${isSpeaking ? "animate-pulse" : ""}`}
+                      ></i>
+                    </button>
+                    <button
+                      onClick={stopSpeaking}
+                      className="p-1.5 rounded-full hover:bg-gray-200"
+                    >
+                      <i className="fas fa-stop"></i>
+                    </button>
+                  </div>
+                )}
+
+                <div className="text-[15px] prose prose-sm max-w-none">
+                  {formatMessage(message.content).map((part, i) =>
+                    part.type === "code" ? (
+                      <div
+                        key={i}
+                        className="mt-2 -mx-4 overflow-hidden rounded-lg"
+                      >
+                        <div className="bg-[#282c34] p-3">
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-gray-400 text-xs uppercase">
+                              {part.language}
+                            </span>
+                            <button
+                              onClick={() => copyToClipboard(part.content)}
+                              className="text-gray-400 hover:text-white p-1.5 rounded-full"
+                            >
+                              <i className="fas fa-copy"></i>
+                            </button>
+                          </div>
+                          <pre className="text-[#abb2bf] overflow-x-auto text-sm font-mono">
+                            <code
+                              dangerouslySetInnerHTML={{ __html: part.content }}
+                            ></code>
+                          </pre>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        key={i}
+                        dangerouslySetInnerHTML={{ __html: part.content }}
+                      />
+                    ),
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="flex justify-start mb-3">
+              <div className="bg-white rounded-full px-4 py-2">
+                <div className="flex space-x-1">
+                  <div className="w-2 h-2 rounded-full bg-[#0be33c] animate-bounce"></div>
+                  <div
+                    className="w-2 h-2 rounded-full bg-[#0be33c] animate-bounce"
+                    style={{ animationDelay: "0.2s" }}
+                  ></div>
+                  <div
+                    className="w-2 h-2 rounded-full bg-[#0be33c] animate-bounce"
+                    style={{ animationDelay: "0.4s" }}
+                  ></div>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 z-20">
+        <div className="max-w-screen-sm mx-auto px-3 py-2">
+          <form onSubmit={handleSubmit} className="relative">
+            <div className="flex items-center bg-gray-100 rounded-full pr-2">
+              <button
+                type="button"
+                onClick={toggleSpeechRecognition}
+                className={`p-3 rounded-full ${
+                  isListening ? "text-red-500 animate-pulse" : "text-gray-600"
+                }`}
+              >
+                <i
+                  className={`fas ${isListening ? "fa-stop" : "fa-microphone"}`}
+                ></i>
+              </button>
+
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type your message..."
+                className="flex-1 bg-transparent px-3 py-2.5 focus:outline-none text-[15px]"
+              />
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setVoiceMode(!voiceMode)}
+                  className={`p-2.5 rounded-full ${
+                    voiceMode ? "text-[#0be33c]" : "text-gray-600"
+                  }`}
+                >
+                  <i className="fas fa-volume-up"></i>
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={loading || !input.trim()}
+                  className={`p-2.5 rounded-full ${
+                    loading || !input.trim()
+                      ? "text-gray-400"
+                      : "text-[#0be33c]"
+                  }`}
+                >
+                  <i className="fas fa-paper-plane"></i>
+                </button>
+              </div>
+            </div>
+          </form>
+
+          <div className="h-safe-area-bottom"></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
